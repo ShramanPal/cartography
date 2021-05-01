@@ -27,6 +27,7 @@ import numpy as np
 import os
 import random
 import shutil
+from sklearn.model_selection import KFold
 import torch
 
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, TensorDataset
@@ -57,7 +58,7 @@ from cartography.classification.models import (
 from cartography.classification.multiple_choice_utils import convert_mc_examples_to_features
 from cartography.classification.params import Params, save_args_to_file
 
-from cartography.selection.selection_utils import log_training_dynamics
+from cartography.selection.selection_utils import log_training_dynamics, log_eval_dynamics
 
 
 try:
@@ -67,6 +68,8 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+KFOLD=3 # no of folds 
 
 ALL_MODELS = sum(
     (
@@ -95,16 +98,16 @@ def set_seed(args):
         torch.cuda.manual_seed_all(args.seed)
 
 
-def train(args, train_dataset, model, tokenizer):
+def train(args, dataset, train_index, dev_index, model, tokenizer):
     """ Train the model """
     if args.local_rank in [-1, 0]:
         tb_writer = SummaryWriter()
 
     args.train_batch_size = args.per_gpu_train_batch_size * max(1, args.n_gpu)
-    train_sampler = RandomSampler(
-        train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
+    #train_sampler = RandomSampler(
+    #    train_dataset) if args.local_rank == -1 else DistributedSampler(train_dataset)
     train_dataloader = DataLoader(
-        train_dataset, sampler=train_sampler, batch_size=args.train_batch_size)
+        dataset, sampler=train_index, batch_size=args.train_batch_size)
 
     if args.max_steps > 0:
         t_total = args.max_steps
@@ -160,7 +163,7 @@ def train(args, train_dataset, model, tokenizer):
 
     # Train!
     logger.info("***** Running training *****")
-    logger.info("  Num examples = %d", len(train_dataset))
+    logger.info("  Num examples = %d", len(train_index))
     logger.info("  Num Epochs = %d", args.num_train_epochs)
     logger.info("  Instantaneous batch size per GPU = %d", args.per_gpu_train_batch_size)
     logger.info(
@@ -171,6 +174,7 @@ def train(args, train_dataset, model, tokenizer):
     )
     logger.info("  Gradient Accumulation steps = %d", args.gradient_accumulation_steps)
     logger.info("  Total optimization steps = %d", t_total)
+    logger.info(f"Set No of folds = {KFOLD} in run_glue.py line 175")
 
     global_step = 0
     epochs_trained = 0
@@ -239,7 +243,7 @@ def train(args, train_dataset, model, tokenizer):
                 train_logits = np.append(train_logits, outputs[1].detach().cpu().numpy(), axis=0)
                 train_golds = np.append(train_golds, inputs["labels"].detach().cpu().numpy())
                 train_losses = np.append(train_losses, loss.detach().cpu().numpy())
-
+            print("\nTrain ids =", train_ids[:5])
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu parallel training
             if args.gradient_accumulation_steps > 1:
@@ -317,7 +321,7 @@ def train(args, train_dataset, model, tokenizer):
         # Only evaluate when single GPU otherwise metrics may not average well
         if args.local_rank == -1 and args.evaluate_during_training:
             best_dev_performance, best_epoch = save_model(
-                args, model, tokenizer, epoch, best_epoch, best_dev_performance)
+                args, model, dataset, dev_index, tokenizer, epoch, best_epoch, best_dev_performance)
 
         # Keep track of training dynamics.
         log_training_dynamics(output_dir=args.output_dir,
@@ -357,8 +361,8 @@ def train(args, train_dataset, model, tokenizer):
     return global_step, tr_loss / global_step
 
 
-def save_model(args, model, tokenizer, epoch, best_epoch,  best_dev_performance):
-    results, _ = evaluate(args, model, tokenizer, prefix="in_training")
+def save_model(args, model, dataset, dev_index, tokenizer, epoch, best_epoch,  best_dev_performance):
+    results, _ = evaluate(args, model, dataset, dev_index, epoch, tokenizer, prefix="in_training")
     # TODO(SS): change hard coding `acc` as the desired metric, might not work for all tasks.
     desired_metric = "acc"
     dev_performance = results.get(desired_metric)
@@ -378,7 +382,7 @@ def save_model(args, model, tokenizer, epoch, best_epoch,  best_dev_performance)
     return best_dev_performance, best_epoch
 
 
-def evaluate(args, model, tokenizer, prefix="", eval_split="dev"):
+def evaluate(args, model, dataset, dev_index, epoch, tokenizer, prefix="", eval_split="dev"):
     # We do not really need a loop to handle MNLI double evaluation (matched, mis-matched).
     eval_task_names = (args.task_name,)
     eval_outputs_dirs = (args.output_dir,)
@@ -386,17 +390,17 @@ def evaluate(args, model, tokenizer, prefix="", eval_split="dev"):
     results = {}
     all_predictions = {}
     for eval_task, eval_output_dir in zip(eval_task_names, eval_outputs_dirs):
-        eval_dataset = load_and_cache_examples(
-            args, eval_task, tokenizer, evaluate=True, data_split=f"{eval_split}_{prefix}")
+        #eval_dataset = load_and_cache_examples(
+        #    args, eval_task, tokenizer, evaluate=True, data_split=f"{eval_split}_{prefix}")
 
-        if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
-            os.makedirs(eval_output_dir)
+        #if not os.path.exists(eval_output_dir) and args.local_rank in [-1, 0]:
+        #    os.makedirs(eval_output_dir)
 
         args.eval_batch_size = args.per_gpu_eval_batch_size * max(1, args.n_gpu)
         # Note that DistributedSampler samples randomly
-        eval_sampler = SequentialSampler(eval_dataset)
+        #eval_sampler = SequentialSampler(eval_dataset)
         eval_dataloader = DataLoader(
-            eval_dataset, sampler=eval_sampler, batch_size=args.eval_batch_size)
+            dataset, sampler=dev_index, batch_size=args.eval_batch_size)
 
         # multi-gpu eval
         if args.n_gpu > 1 and not isinstance(model, torch.nn.DataParallel):
@@ -404,7 +408,7 @@ def evaluate(args, model, tokenizer, prefix="", eval_split="dev"):
 
         # Eval!
         logger.info(f"***** Running {eval_task} {prefix} evaluation on {eval_split} *****")
-        logger.info(f"  Num examples = {len(eval_dataset)}")
+        logger.info(f"  Num examples = {len(dev_index)}")
         logger.info(f"  Batch size = {args.eval_batch_size}")
         eval_loss = 0.0
         nb_eval_steps = 0
@@ -438,7 +442,8 @@ def evaluate(args, model, tokenizer, prefix="", eval_split="dev"):
                 preds = np.append(preds, logits.detach().cpu().numpy(), axis=0)
                 out_label_ids = np.append(
                     out_label_ids, inputs["labels"].detach().cpu().numpy(), axis=0)
-
+        
+        eval_logits=preds.copy()        # Storing eval logits as pred variable is changed later on
         eval_loss = eval_loss / nb_eval_steps
         if args.output_mode == "classification":
             probs = torch.nn.functional.softmax(torch.Tensor(preds), dim=-1)
@@ -473,6 +478,11 @@ def evaluate(args, model, tokenizer, prefix="", eval_split="dev"):
                           "probabilities": prob}
                 all_predictions[eval_task].append(record)
                 writer.write(json.dumps(record) + "\n")
+        log_eval_dynamics(output_dir=args.output_dir,
+                      epoch=epoch,
+                      eval_ids=list(example_ids),
+                      eval_logits=list(eval_logits),
+                      eval_golds=list(out_label_ids))
 
     return results, all_predictions
 
@@ -678,7 +688,23 @@ def run_transformer(args):
 
     # Training
     args.learning_rate = float(args.learning_rate)
-    if args.do_train:
+
+    # KFOLD implementation
+    nfolds=int(args.nfolds)
+    dataset = load_and_cache_examples(args, args.task_name, tokenizer, evaluate=False)
+    assert len(dataset) % nfolds == 0, "Dataset size not divisible by number of folds"    #assert dataset size is divisible by no of folds
+    
+    indices=[i for i in range(len(dataset))]
+    train_indices=[]                                     # list of indices of train set and dev set 
+    dev_indices=[]                                       # for each iteration of fold
+    kfold=KFold(n_splits=nfolds, shuffle=True, random_state=args.seed)
+    for train_index, dev_index in kfold.split(indices):
+      train_indices.append(train_index)
+      dev_indices.append(dev_index)
+    
+    for k in range(nfolds):
+      logger.info(f"\n*** FOLD {k+1} ***\n")
+      if args.do_train:    
         # If training for the first time, remove cache. If training from a checkpoint, keep cache.
         if os.path.exists(args.features_cache_dir) and not args.overwrite_output_dir:
             logger.info(f"Found existing cache for the same seed {args.seed}: "
@@ -690,28 +716,31 @@ def run_transformer(args):
             os.makedirs(args.output_dir)
             save_args_to_file(args, mode="train")
 
-        train_dataset = load_and_cache_examples(args, args.task_name, tokenizer, evaluate=False)
-        global_step, tr_loss = train(args, train_dataset, model, tokenizer)
+        dataset = load_and_cache_examples(args, args.task_name, tokenizer, evaluate=False)
+        
+        global_step, tr_loss = train(args, dataset, train_indices[k], dev_indices[k], model, tokenizer)
         logger.info(f" global_step = {global_step}, average loss = {tr_loss:.4f}")
 
-    # Saving best-practices: if you use defaults names for the model,
-    # you can reload it using from_pretrained()
-    if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
+      # Saving best-practices: if you use defaults names for the model,
+      # you can reload it using from_pretrained()
+      if args.do_train and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
-        if not args.evaluate_during_training:
-            logger.info("Saving model checkpoint to %s", args.output_dir)
-            # Save a trained model, configuration and tokenizer using `save_pretrained()`.
-            # They can then be reloaded using `from_pretrained()`
+          if not args.evaluate_during_training:
+              logger.info("Saving model checkpoint to %s", args.output_dir)
+              # Save a trained model, configuration and tokenizer using `save_pretrained()`.
+              # They can then be reloaded using `from_pretrained()`
 
-            # Take care of distributed/parallel training
-            model_to_save = (model.module if hasattr(model, "module") else model)
-            model_to_save.save_pretrained(args.output_dir)
-            tokenizer.save_pretrained(args.output_dir)
+              # Take care of distributed/parallel training
+              model_to_save = (model.module if hasattr(model, "module") else model)
+              model_to_save.save_pretrained(args.output_dir)
+              tokenizer.save_pretrained(args.output_dir)
 
-            # Good practice: save your training arguments together with the trained model
-            torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+              # Good practice: save your training arguments together with the trained model
+              torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
 
-        logger.info(" **** Done with training ****")
+      logger.info(f"*** Done with {k+1}th Fold out of {nfolds}")
+    
+    logger.info(" **** Done with training ****")
 
     # Evaluation
     eval_splits = []
@@ -779,6 +808,9 @@ def main():
     parser.add_argument("--test",
                         type=os.path.abspath,
                         help="OOD test set.")
+    parser.add_argument("--nfolds",
+                        required=True,
+                        help="Specify the number of folds in K fold validation")
 
     # TODO(SS): Automatically map tasks to OOD test sets.
 

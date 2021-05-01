@@ -58,7 +58,7 @@ def convert_mc_examples_to_features(
     """
     Loads a data file into a list of `MCInputFeatures`
     """
-
+    #print("\n Before label map in mcutils line 61 \n label_list= ", label_list[:5])
     label_map = {label: i for i, label in enumerate(label_list)}
 
     features = []

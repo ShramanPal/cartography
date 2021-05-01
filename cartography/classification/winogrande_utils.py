@@ -31,7 +31,7 @@ class WinograndeProcessor(DataProcessor):
 
     def get_labels(self):
       """See base class."""
-      return ["1", "2"]
+      return ["0", "1"]
 
     def _build_example_from_named_fields(self, guid, sentence, name1, name2, label):
       conj = "_"
@@ -57,10 +57,12 @@ class WinograndeProcessor(DataProcessor):
       for idx, line in tsv_dict.items():
         fields = line.strip().split("\t")
         assert idx == fields[0]
-        sentence = fields[2]
-        name1 = fields[3]
-        name2 = fields[4]
-        if len(fields) > 5:
+
+        sentence = fields[3]      #original 2
+        name1 = fields[1]         #original 3
+        name2 = fields[2]         #original 4
+
+        if len(fields) > 4:
           label = fields[-1]
         else:
           label = "1"  # Dummy label for test prediction.

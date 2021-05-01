@@ -45,6 +45,9 @@ class Params:
       # Whether to run eval on the dev set.
       self.do_test : bool = configs.get("do_test", False)
 
+      # Number of folds in K fold validation.
+      self.nfolds : int = configs.get("nfolds", 3)
+
       ### Other parameters
 
       # Pretrained config name or path if not the same as `model_name`.
