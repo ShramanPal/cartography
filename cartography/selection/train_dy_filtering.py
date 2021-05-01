@@ -22,7 +22,7 @@ from collections import defaultdict
 from typing import List
 
 from cartography.data_utils import read_data, read_jsonl, copy_dev_test
-from cartography.selection.selection_utils import read_training_dynamics
+from cartography.selection.selection_utils import read_training_dynamics, read_eval_dynamics
 
 # TODO(SS): Named tuple for tasks and filtering methods.
 
@@ -390,12 +390,21 @@ if __name__ == "__main__":
   parser.add_argument("--model",
                       default="RoBERTa",
                       help="Model for which data map is being plotted")
+  parser.add_argument("--split",
+                      default="train",
+                      help='Which dynamics to plot "train" for train dynamics, "eval" for eval dynamics')
 
   args = parser.parse_args()
 
-  training_dynamics = read_training_dynamics(args.model_dir,
-                                             strip_last=True if args.task_name in ["QNLI"] else False,
-                                             burn_out=args.burn_out if args.burn_out < 100 else None)
+  if args.split == "train":
+    training_dynamics = read_training_dynamics(args.model_dir,
+                                              strip_last=True if args.task_name in ["QNLI"] else False,
+                                              burn_out=args.burn_out if args.burn_out < 100 else None)
+  else:
+    training_dynamics = read_eval_dynamics(args.model_dir,
+                                              strip_last=True if args.task_name in ["QNLI"] else False,
+                                              burn_out=args.burn_out if args.burn_out < 100 else None)
+
   total_epochs = len(list(training_dynamics.values())[0]["logits"])
   if args.burn_out > total_epochs:
     args.burn_out = total_epochs
